@@ -24,9 +24,14 @@ lymphatic$subcluster <- plyr::mapvalues(
 Idents(lymphatic)<-"subcluster"
 pm<- FindAllMarkers(lymphatic, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
 library(dplyr)
-top10 <- pm %>% group_by(cluster) %>% top_n(n = 5, wt = avg_log2FC)
+top5<- pm %>% group_by(cluster) %>% top_n(n = 5, wt = avg_log2FC)
 lymphatic<-ScaleData(lymphatic)
-DoHeatmap(lymphatic, features = top10$gene, size=3) + NoLegend()+scale_fill_distiller(palette = "PiYG")
+
+library(ggbeeswarm)
+library(ggthemes)
+library(viridis)
+library(ggplot2)
+DoHeatmap(lymphatic, features = top5$gene, size=3) + NoLegend()+scale_fill_distiller(palette = "PiYG")
 
 Idents(lymphatic)<-factor(Idents(lymphatic),levels=c("Angioblast","Angioblast_EC","LEC","LEC_Prog","Large_Vein","Vein","Vein_Prox1+"))
 
