@@ -1,0 +1,117 @@
+# Aden Forrow
+# 24 August 2021
+# Creating pdf versions of figures for Irina
+
+import copy
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import wot
+
+
+# Load anndata and add clusters from separate .csv
+adata = sc.read('../Data/integrated.h5ad')
+clusters = pd.read_csv('../Data/cluster.csv', index_col = 0)
+adata.obs['cluster_label'] = clusters['cluster']
+
+# Load force atlas embedding and add to adata
+force_atlas_embedding = pd.read_csv('../Data/force_atlas_embedding.csv', index_col = 0)
+adata.obs['fa_1'] = force_atlas_embedding.loc[adata.obs.index, "X_draw_graph_fa1"]
+adata.obs['fa_2'] = force_atlas_embedding.loc[adata.obs.index, "X_draw_graph_fa2"]
+adata.obsm["X_force_atlas"]  = np.array(adata.obs[['fa_1', 'fa_2']])
+
+# Loading optimal transport couplings
+tmap_save_dir = '../Data/tmaps/all_default_params' 
+# The following lines were used to compute the couplings, which we now just load.
+#ot_model = wot.ot.OTModel(adata,epsilon = 0.05, lambda1 = 1,lambda2 = 50, day_field = "time")
+#ot_model.compute_all_transport_maps(tmap_out=tmap_save_dir)
+tmap_model = wot.tmap.TransportMapModel.from_directory(tmap_save_dir)
+
+# Converting clusters to cell sets that WOT expects
+cell_sets = {}
+clusters = np.unique(adata.obs['cluster_label'])
+clusters.sort()
+for cluster in clusters:
+    cell_sets[cluster] = list(adata.obs[adata.obs['cluster_label'] == cluster].index)
+
+# converting coordinates to the same format as the wot demos
+coord_df = pd.DataFrame(index = adata.obs.index, data = {'x': adata.obsm['X_force_atlas'][:,0], 'y': adata.obsm['X_force_atlas'][:,1]})
+nbins = 500
+xrange = coord_df['x'].min(), coord_df['x'].max()
+yrange = coord_df['y'].min(), coord_df['y'].max()
+coord_df['x'] = np.floor(
+    np.interp(coord_df['x'], [xrange[0], xrange[1]], [0, nbins - 1])).astype(int)
+coord_df['y'] = np.floor(
+    np.interp(coord_df['y'], [yrange[0], yrange[1]], [0, nbins - 1])).astype(int)
+
+
+# main plotting function
+def plot_trajectory(name, day, direction):
+    figure = plt.figure(figsize=(8, 8))
+    plt.axis('off')
+    plt.tight_layout()
+    #plt.title(name)
+    
+    # compute trajectories from couplings
+    populations = tmap_model.population_from_cell_sets(cell_sets, at_time=day)
+    trajectory_ds = tmap_model.trajectories(populations)
+    trajectory_ds.obs = trajectory_ds.obs.join(coord_df)
+    
+    
+    # binned data will combine cells with the same plot coordinates
+    binned_df = trajectory_ds.obs.copy()
+    if name in trajectory_ds.var.index:
+        binned_df['values'] = trajectory_ds[:, name].X
+    else:
+        binned_df['values'] = pd.Series(index = adata.obs.index, data = np.zeros(len(adata.obs.index)))
+    
+    # Set cells that are from later/earlier time points to not be part
+    # of ancestor/descendant trajectory respectively
+    if direction == "Show ancestors":
+        binned_df.loc[adata[(adata.obs['time'] > day)].obs.index, 'values'] = 0
+    elif direction == "Show descendants":
+        binned_df.loc[adata[(adata.obs['time'] < day)].obs.index, 'values'] = 0
+    
+
+    binned_df = binned_df.groupby(['x', 'y'], as_index=False).sum()
+    
+    cmap = copy.copy(plt.get_cmap('Blues'))
+    cmap.set_under('lightgrey')
+    
+    offset = 0.00001
+    vmin=binned_df['values'].quantile(0.01)+offset
+    vmax=max(binned_df['values'].quantile(0.975), vmin+offset)
+        
+    p = plt.scatter(binned_df['x'], binned_df['y'], c=binned_df['values'],
+                   s=40, marker='.', edgecolors='none', cmap = cmap, 
+                vmin=vmin,
+                vmax=vmax)
+    
+    # Color target cells separately
+    cluster_cells = adata[(adata.obs['cluster_label'] == name) & (adata.obs['time'] == day)].obs.index 
+    plt.scatter(coord_df.loc[cluster_cells, :]['x'], coord_df.loc[cluster_cells, :]['y'], c='orange',
+                   s=40, marker='.', edgecolors='none')
+    # add colorbar
+    plt.colorbar(p)#.ax.set_title('Trajectory')
+    return figure
+
+
+
+# Saving pdf plots of trajectories of selected clusters
+
+save_path = "../Notes/Plots/default_params/"
+
+requested_plots = [("Vein", 0, "descendants"),
+                   ("Vein", 1, "descendants"),
+                   ("Angioblast", 0, "descendants"),
+                   ("Angioblast", 1, "descendants"),
+                   ("LEC_Prog", 1, "ancestors"),
+                   ("Lymphatic", 1, "ancestors"),
+                  ]
+
+for p in requested_plots:
+    fig = plot_trajectory(p[0], p[1], "Show "+p[2])
+    filename = p[0] + "_e" + str(p[1]+9) + "_" + p[2] + ".pdf"
+    fig.savefig(save_path+filename, bbox_inches = "tight")
+
