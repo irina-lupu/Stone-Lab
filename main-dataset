@@ -1,0 +1,151 @@
+#in R
+library(Seurat)
+
+#repeat for every sample
+sample <- Read10X(data.dir="run_10x_e9pos/outs/filtered_feature_bc_matrix")
+sample <- CreateSeuratObject(counts = sample, min.cells = 3)
+sample[["percent.mt"]] <- PercentageFeatureSet(sample, pattern = "^mt-")
+sample$orig.ident <- "e9pos"
+sample$stage <- "E9"
+
+FeatureScatter(sample, feature1 = "nFeature_RNA", feature2 = "percent.mt")
+
+VlnPlot(sample, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+sample <- subset(sample, subset = nFeature_RNA > 2500 & nCount_RNA < 100000 & percent.mt < 7)
+
+#convert cell cycle genes to mouse nomenclature
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+s.genes <-tolower(s.genes)
+CapStr <- function(y) {
+  c <- strsplit(y, " ")[[1]]
+  paste(toupper(substring(c, 1,1)), substring(c, 2),
+        sep="", collapse=" ")
+}
+s.genes <- sapply(s.genes,CapStr)
+g2m.genes <- tolower(g2m.genes)
+g2m.genes <- sapply(g2m.genes, CapStr)
+
+library(SeuratData)
+library(SeuratWrappers)
+
+sample<- NormalizeData(sample)
+sample<- FindVariableFeatures(sample)
+sample<-ScaleData(sample)
+sample<- CellCycleScoring(sample, s.features = s.genes, g2m.features = g2m.genes)
+
+e9pos<-sample
+
+#after pre-processing all samples
+
+integrated<-merge(e9pos, y=c(e9neg,e10pos,e10neg,e11neg,e11pos))
+integrated <- RunFastMNN(object.list = SplitObject(integrated, split.by = "orig.ident"), auto.merge=T, k=10, reduction.name = "mnn")
+
+integrated <- FindNeighbors(integrated, reduction = "mnn", dims = 1:10, k.param=10)
+integrated<- FindClusters(integrated, resolution =2)
+
+integrated <- RunUMAP(integrated, reduction = "mnn", dims = 1:20, n.neighbors = 10, min.dist = 0.5)
+DimPlot(integrated, label = T)
+
+integrated$lineage <- plyr::mapvalues(
+  x = integrated$stage,
+  from = c("e10neg","e10pos","e11neg","e11pos","e9neg","e9pos"),
+  to = c("neg","pos","neg","pos","neg","pos"))
+  
+markers<- FindAllMarkers(integrated, only.pos = TRUE, min.pct = 0.75, logfc.threshold = 0.25)
+library(dplyr)
+top10 <- markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+library(ggbeeswarm)
+library(ggthemes)
+library(viridis)
+library(ggplot2)
+
+DoHeatmap(subset(integrated, downsample = 100), features = top10$gene, size=4) + NoLegend()+scale_fill_distiller(palette = "PiYG")
+
+integrated$cluster <- plyr::mapvalues(
+  x = integrated$seurat_clusters,
+  from = c(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47),
+  to = c("Sprouting","Vein","Sprouting","Angiogenic","Angiogenic","Venous","Venous","Venous","Arterial","Pre-arterial","PXM/Pharyngeal_Mes","PXM/Pharyngeal_Mes","Venous","Endocardium","Liver_EC","Valve","LEC_Prog","Angioblast","Neural_tube_EC","Neural_tube_Prog","Valve","Neural_tube_Prog","Endocardium","EndoMT","Liver_EC","Lymphatic","LPM","Valve","Artery","PGC","Angioblast","OFT_Mes","EndoMT","Sprouting","SHF","Neural_Crest","OFT_Mes","Mesenchyme","Sinus_Venosus","Neural_Crest","RBC","Aorta","Sinus_Venosus","aSHF","pSHF","Mesothelium","PGC","Immune"))
+Idents(integrated)<-"cluster"
+
+library(SeuratDisk)
+
+SaveH5Seurat(integrated, filename = "integrated.h5Seurat") 
+Convert("integrated.h5Seurat", dest = "h5ad")
+
+#in Python
+import scanpy as sc
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as pl
+from matplotlib import rcParams
+import os
+# Initialize random seed
+import random
+random.seed(101)
+#Allow plotting in cell
+%matplotlib inline
+
+os.chdir("")
+adata = sc.read_h5ad('integrated.h5ad')
+sc.pp.neighbors(adata, n_neighbors=10, use_rep="X_mnn")
+#denoise the graph using diffusion components
+sc.tl.diffmap(adata)
+sc.pp.neighbors(adata, n_neighbors=10, use_rep='X_diffmap')
+
+#add cluster information to scanpy object
+subcluster = pd.read_csv('cluster.csv', index_col=0)
+subcluster
+adata.obs['subcluster'] = subcluster['cluster']
+
+#run PAGA
+sc.tl.paga(adata, groups='subcluster')
+sc.pl.paga(adata)
+sc.tl.draw_graph(adata, init_pos='paga')
+sc.pl.draw_graph(adata, color=['subcluster'])
+sc.pl.paga_compare(
+  adata, threshold=0.11, right_margin=0.2, size=3, edge_width_scale=0.3,node_size_scale =0.5,node_size_power =1,
+  legend_fontsize=3, fontsize=3, frameon=False, edges=False)
+adata.obsm.to_df()[['X_draw_graph_fa1','X_draw_graph_fa2']].to_csv(r'\\integrated_fa2.csv')
+
+
+#in R
+#add PAGA embedding
+fa<-as.matrix(read.csv("/integrated_fa2.csv", row.names = 1))
+integrated[["fa2"]] <- CreateDimReducObject(embeddings = fa, key = "X_draw_graph_", assay = DefaultAssay(integrated))
+
+#visualisations for Figures
+DimPlot(integrated, pt.size = 0.75,reduction="fa2",group.by="lineage", cols=c("#5FB688","medium orchid"), shuffle = T)
+DimPlot(integrated, reduction = "fa2", pt.size = 0.75, group.by = "Phase", cols=c("#696969","#A58B5E",'#E4CDA6'), shuffle=T)
+DimPlot(integrated, pt.size = 0.75,group.by="time", reduction = "fa2", cols=c("#FDE360","#EE9D11","#AF1010"), shuffle = T)
+
+
+FeaturePlot(integrated,reduction="fa2" ,features=c("Cdh5"),cols=c("#E0E0E0","#008BAE"),pt.size = 0.75, order=T)
+
+#make stack plot for counts
+integrated$orig.ident<-factor(integrated$orig.ident, levels=c("e9pos","e10pos","e11pos","e9neg","e10neg","e11neg"))
+integrated$cluster <- factor(integrated$cluster, levels = c("Liver_EC","Sinus_Venosus","Vein","Venous","Endocardium","EndoMT","Valve","OFT_Mes","Aorta","Artery","Arterial","Pre-arterial","Neural_tube_EC","Neural_tube_Prog","Sprouting","Angiogenic","PXM/Pharyngeal_Mes","Angioblast","LEC_Prog","Lymphatic","Neural_Crest","SHF","LPM","aSHF","pSHF","RBC","Immune","PGC","Mesothelium","Mesenchyme"))
+
+condition<-as.data.frame(table(cluster=integrated$cluster, batch=integrated$orig.ident))
+ggplot(condition, aes(fill=batch, y=Freq, x=cluster)) + 
+  geom_bar(position="fill", stat="identity") + theme_classic()+ scale_colour_tableau()+scale_fill_manual(values = c("#B07CC0", "#824097", 
+                                                                                                                    "#C35DEF", "#80AE9A", "#418769","#135A3B"))+theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+                               
+                                                                                                                                                                                                        "#80AE9A", "#418769","#135A3B"))+theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+integrated$cluster <- factor(integrated$cluster, levels = c('Angioblast','Angiogenic','Aorta','Arterial','Artery','EndoMT','Endocardium','Immune','LEC_Prog','LPM','Liver_EC','Lymphatic','Mesenchyme','Mesothelium','Neural_Crest','Neural_tube_EC','Neural_tube_Prog','OFT_Mes','PGC','PXM/Pharyngeal_Mes','Pre-arterial','RBC','SHF','Sinus_Venosus','Sprouting','Valve','Vein','Venous','aSHF','pSHF'))
+DimPlot(integrated, pt.size = 0.75,reduction="fa2",group.by="cluster", cols=c('#9E6EC3','#BAF6F2','#1FBC00','#98C38F','#5BB249',
+                                                                              '#E2B863','#C09A4E','#A0A0A0','#C7AAE8','#A0A0A0',
+                                                                              '#CE4C4C','#DBC6E9','#A0A0A0','#A0A0A0','#808080',
+                                                                              '#2BA3BA','#65B4C4','#E4D5B9','#A0A0A0','#885EC6',
+                                                                              '#ACE9B2','#A0A0A0','#A0A0A0','#CA7474','#8FD8D3',
+                                                                              '#DAC99A','#EE9696','#EEC7C7','#808080','#808080'))
+
+
+
+
+
+
+
+
