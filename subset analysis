@@ -1,0 +1,96 @@
+library(SeuratData)
+library(SeuratWrappers)
+library(Seurat)
+#Subset Analysis in R
+lymphatic<-subset(integrated, idents=c("Vein","Lymphatic","LEC_Prog","Angioblast"))
+
+lymphatic<-FindVariableFeatures(lymphatic)
+lymphatic<-RunPCA(lymphatic, features=VariableFeatures(lymphatic))
+
+
+lymphatic <- RunFastMNN(object.list = SplitObject(lymphatic, split.by = "orig.ident"), auto.merge=T, k=10, reduction.name = "prox")
+
+lymphatic<- RunUMAP(lymphatic, dims = 1:30, n.neighbors = 10, min.dist = 0.3, reduction = "prox", spread = 0.5)
+DimPlot(lymphatic, label = T, group.by = "cluster")+NoLegend()
+lymphatic <- FindNeighbors(lymphatic, dims = 1:30,  k.param=10, reduction = "prox")
+lymphatic<- FindClusters(lymphatic, resolution =0.8)
+DimPlot(lymphatic, label = T)
+
+lymphatic$subcluster <- plyr::mapvalues(
+  x = lymphatic$seurat_clusters,
+  from = c(0,1,2,3,4,5,6,7,8,9,10),
+  to = c("Vein","Large_Vein","LEC","LEC_Prog","Angioblast_EC","Angioblast","LEC_Prog","Angioblast_EC","LEC","Vein_Prox1+","Angioblast"))
+
+Idents(lymphatic)<-"subcluster"
+pm<- FindAllMarkers(lymphatic, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+library(dplyr)
+top10 <- pm %>% group_by(cluster) %>% top_n(n = 5, wt = avg_log2FC)
+lymphatic<-ScaleData(lymphatic)
+DoHeatmap(lymphatic, features = top10$gene, size=3) + NoLegend()+scale_fill_distiller(palette = "PiYG")
+
+Idents(lymphatic)<-factor(Idents(lymphatic),levels=c("Angioblast","Angioblast_EC","LEC","LEC_Prog","Large_Vein","Vein","Vein_Prox1+"))
+
+DimPlot(lymphatic, label=T, cols=c('#483D8B','#4682B4','#C8B7DB','#B0E0E6','#FFA500','#FF4500','#FFA07A'))
+
+library(SeuratDisk)
+
+SaveH5Seurat(lymphatic, filename = "lec_subset.h5Seurat") 
+Convert("lec_subset.h5Seurat", dest = "h5ad")
+
+
+#in UNIX
+#get sliced/unspliced counts for scVelo, repeat for every sample
+velocyto run -b run_10x_e9pos/outs/barcodes.tsv -m mm10_rmsk.gtf run_10x_e9pos/outs/possorted_genome_bam.bam refdata-gex-mm10-2020-A/genes/genes.gtf
+
+#in Python
+import os
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import anndata
+import scvelo as scv
+import numpy as np
+import loompy
+import scanpy as sc
+# Initialize random seed
+import random
+random.seed(101)
+#Allow plotting in cell
+%matplotlib inline
+
+#combine loom files for all samples
+loompy.combine(["possorted_genome_bam_0JXBF_e10neg.loom","possorted_genome_bam_I3CXG_e9pos.loom","possorted_genome_bam_IRUAP_e11neg.loom","possorted_genome_bam_MFF7O_e11pos.loom","possorted_genome_bam_NG1HG_e10pos.loom","possorted_genome_bam_YSAJ8_e9neg.loom"], output_file="combinedALL.loom")
+
+#Read in loom for all samples
+sample_one = anndata.read_loom("combinedALL.loom")
+sample_one.var_names_make_unique
+sample_one.obs.index
+
+adata = sc.read_h5ad('lec_subset.h5ad')
+sc.pl.umap(adata, color="subcluster",palette= ['#483D8B','#4682B4','#B0E0E6','#C8B7DB','#FFA07A','#FFA500','#FF4500'])
+sc.pl.tracksplot(adata, ["Top2a", "Ccna2", "Ccnb1", "Ccnd1","Ccne1","Cenpf","Vwf", "Prox1"], groupby='subcluster',categories_order=["Angioblast","Angioblast_EC","LEC_Prog","LEC","Vein_Prox1+","Large_Vein","Vein"],save=True)
+
+adata = scv.utils.merge(adata, sample_one)
+scv.pl.proportions(adata,groupby="subcluster")
+scv.pp.filter_and_normalize(adata, min_shared_counts=20, n_top_genes=2000,enforce=True)
+scv.pp.moments(adata, n_pcs=30, n_neighbors=30,use_rep="X_prox")
+scv.tl.recover_dynamics(adata)
+scv.tl.velocity(adata, mode='dynamical')
+scv.tl.velocity_graph(adata)
+scv.pl.velocity_embedding_stream(adata,color="subcluster",basis="X_umap", dpi=150)
+scv.pl.paga(adata, basis='umap', size=50, alpha=.1,
+            min_edge_width=2, node_size_scale=1.5)
+
+
+import cellrank as cr
+import numpy as np
+
+cr.tl.terminal_states(adata, cluster_key='subcluster', weight_connectivities=0.2)
+cr.pl.terminal_states(adata, discrete=True)
+cr.tl.initial_states(adata, cluster_key='subcluster')
+cr.pl.initial_states(adata, discrete=True)
+
+
+
+
+
